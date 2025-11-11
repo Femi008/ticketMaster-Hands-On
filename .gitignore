@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # Remix compiler artifacts
 **/artifacts/
 **/artifacts/**
@@ -13,3 +14,19 @@ states/
 # Optional
 .env
 .env.local
+=======
+# Compiler files
+cache/
+out/
+
+# Ignores development broadcast logs
+!/broadcast
+/broadcast/*/31337/
+/broadcast/**/dry-run/
+
+# Docs
+docs/
+
+# Dotenv file
+.env
+>>>>>>> 18c3c32 (My first commit)
