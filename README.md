@@ -1,70 +1,106 @@
-<<<<<<< HEAD
-# ticketMaster-Hands-On
-=======
-## Foundry
+world class ticketing platform
 
-**Foundry is a blazing fast, portable and modular toolkit for Ethereum application development written in Rust.**
+1. cryptographic proof generation
+ Every ticket has its own unique proof that cannot be forged
 
-Foundry consists of:
+2. There must be prevention of double spending
+multiple layers to prevent replay attacks and reuse of ticket
 
-- **Forge**: Ethereum testing framework (like Truffle, Hardhat and DappTools).
-- **Cast**: Swiss army knife for interacting with EVM smart contracts, sending transactions and getting chain data.
-- **Anvil**: Local Ethereum node, akin to Ganache, Hardhat Network.
-- **Chisel**: Fast, utilitarian, and verbose solidity REPL.
+3. Complete Ownership tracking
+This could help to curb fraud and helps in complete audit trail
 
-## Documentation
+4. Onchain verification is a must
+This could be manual verification at event entry or P2P resale verification
 
-https://book.getfoundry.sh/
+5. Signature Based verification
+Event creator could sign tickets or delegate the signing for extra layer of security
 
-## Usage
+6. BlackList system
+Bad actors should be blacklisted from the platform for good.
 
-### Build
+7. Community Members able to suggests blacklist
+Anyone could report the bad actor, then admin then verifies
 
-```shell
-$ forge build
-```
+8. Nullification of event tickets
+Stolen tickets should be nullified immediately 
 
-### Test
+9. Validate multiple tickets at once 
+Large events could be mass verified at once 
 
-```shell
-$ forge test
-```
 
-### Format
 
-```shell
-$ forge fmt
-```
+the multiple layer of security
 
-### Gas Snapshots
+┌─────────────────────────────────────────┐
+│  Layer 1: Cryptographic Proof          │
+│  ✓ Unique hash per ticket               │
+└────────────┬────────────────────────────┘
+             │
+┌────────────▼────────────────────────────┐
+│  Layer 2: Ownership Tracking            │
+│  ✓ Full transfer history                │
+└────────────┬────────────────────────────┘
+             │
+┌────────────▼────────────────────────────┐
+│  Layer 3: Usage Validation              │
+│  ✓ One-time use enforcement             │
+└────────────┬────────────────────────────┘
+             │
+┌────────────▼────────────────────────────┐
+│  Layer 4: Signature Verification        │
+│  ✓ Authorized verifier only             │
+└────────────┬────────────────────────────┘
+             │
+┌────────────▼────────────────────────────┐
+│  Layer 5: Blacklist System              │
+│  ✓ Ban fraudulent users                 │
+└─────────────────────────────────────────┘ 
 
-```shell
-$ forge snapshot
-```
 
-### Anvil
+Ticket Purchase 
 
-```shell
-$ anvil
-```
+1. User buys ticket
+   ↓
+2. Generate unique ticket ID
+   ↓
+3. Create cryptographic proof
+   ↓
+4. Store proof on-chain
+   ↓
+5. Track in user's tickets
+   ↓
+6. Emit TicketVerified event
 
-### Deploy
 
-```shell
-$ forge script script/Counter.s.sol:CounterScript --rpc-url <your_rpc_url> --private-key <your_private_key>
-```
+Ticket Traansfer
 
-### Cast
+1. Seller initiates transfer
+   ↓
+2. Verify seller ownership
+   ↓
+3. Check ticket validity
+   ↓
+4. Update ownership history
+   ↓
+5. Transfer count++
+   ↓
+6. Update user ticket lists
+   ↓
+7. Pay royalty to organizer
 
-```shell
-$ cast <subcommand>
-```
 
-### Help
+Ticket Usage verification
 
-```shell
-$ forge --help
-$ anvil --help
-$ cast --help
-```
->>>>>>> 18c3c32 (My first commit)
+1. Scan ticket at venue
+   ↓
+2. Verify ticket exists
+   ↓
+3. Check not already used
+   ↓
+4. Verify current owner
+   ↓
+5. Check proof validity
+   ↓
+6. Mark as used
+   ↓
+7. Grant entry ✅
