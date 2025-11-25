@@ -2,14 +2,11 @@
 pragma solidity ^0.8.26;
 
 import "./interfaces/ERC1155.sol";
-/**
- * @title ITicketMaster
- * @dev Interface for the TicketMaster contract
- */
+
 interface ITicketMaster {
     struct Event {
         string name;
-        string metadata; // IPFS hash for event details
+        string metadata;
         address organizer;
         uint256 maxSupply;
         uint256 totalMinted;
@@ -18,84 +15,114 @@ interface ITicketMaster {
         uint256 endTime;
         bool active;
         bool transferable;
-        uint16 royaltyBps; // Basis points (1/100th of a percent)
+        bool dynamicPricing;
+        uint16 royaltyBps;
     }
 
-    event EventCreated(
-        uint256 indexed eventId,
-        address indexed organizer,
-        string name,
-        uint256 maxSupply,
-        uint256 price
-    );
-    event TicketMinted(
-        uint256 indexed eventId,
-        address indexed buyer,
-        uint256 quantity,
-        uint256 totalPrice
-    );
-    event TicketBurned(
-        uint256 indexed eventId,
-        address indexed owner,
-        uint256 quantity
-    );
-    event TicketUsed(uint256 indexed eventId, address indexed owner, uint256 tokenId);
+    struct TicketProof {
+        uint256 eventId;
+        address originalOwner;
+        uint256 mintTimestamp;
+        bytes32 proofHash;
+        bool isValid;
+    }
+
+    event EventCreated(uint256 indexed eventId, address indexed organizer, string name, uint256 maxSupply, uint256 price);
+    event TicketMinted(uint256 indexed eventId, address indexed buyer, uint256 quantity, uint256 totalPrice);
+    event TicketUsed(uint256 indexed eventId, address indexed owner, uint256 ticketId);
     event EventStatusChanged(uint256 indexed eventId, bool active);
-    event RoyaltyPaid(
-        uint256 indexed eventId,
-        address indexed from,
-        address indexed to,
-        uint256 amount
-    );
+    event RoyaltyPaid(uint256 indexed eventId, address indexed from, address indexed to, uint256 amount);
+    event TicketVerified(uint256 indexed eventId, uint256 indexed ticketId, address indexed owner, bytes32 proofHash);
+    event FraudAttemptDetected(uint256 indexed eventId, uint256 indexed ticketId, address indexed attacker, string reason);
+    event TicketInvalidated(uint256 indexed eventId, uint256 indexed ticketId, string reason);
 }
 
-/**
- * @title TicketMaster
- * @dev World-class decentralized ticketing platform using ERC1155
- * @notice This contract manages event creation, ticket minting, burning, and secondary market royalties
- */
 contract TicketMaster is ERC1155, ITicketMaster {
-    // State variables
+    // ------------------------
+    // Errors
+    // ------------------------
+    error Err_InvalidFeeRecipient();
+    error Err_NotOrganizer();
+    error Err_NotAdmin();
+    error Err_EventNotExist();
+    error Err_InvalidVerifier();
+    error Err_InvalidParams();
+    error Err_MaxSupplyExceeded();
+    error Err_EventNotActive();
+    error Err_InsufficientPayment();
+    error Err_TransferNotAllowed();
+    error Err_TicketInvalid();
+    error Err_TicketUsed();
+    error Err_NotTicketOwner();
+    error Err_Blacklisted();
+    error Err_RoyaltyPaymentFailed();
+    error Err_PaymentFailed();
+    error Err_UnsafeTransfer();
+
+    // ------------------------
+    // State - Optimized packing
+    // ------------------------
     uint256 private _eventIdCounter;
+    uint256 private _ticketIdCounter;
+
     mapping(uint256 => Event) private _events;
-    mapping(uint256 => mapping(uint256 => bool)) private _usedTickets; // eventId => tokenId => used
-    mapping(address => uint256[]) private _organizerEvents;
-    
-    // Platform fee (in basis points, e.g., 250 = 2.5%)
-    uint16 public platformFeeBps = 250;
+
+    // Simplified ticket tracking - reduced storage operations
+    mapping(uint256 => TicketProof) private _ticketProofs;
+    mapping(uint256 => mapping(address => uint256[])) private _userTickets;
+
+    // Minimal tracking for transfers
+    mapping(uint256 => address) private _currentTicketOwner;
+    mapping(uint256 => uint8) private _ticketTransferCount;
+
+    // Essential verifications only
+    mapping(uint256 => address) private _eventVerifiers;
+    mapping(uint256 => mapping(uint256 => bool)) private _usedTickets;
+    mapping(address => bool) private _blacklisted;
+
+    uint16 public platformFeeBps = 250; // 2.5%
     address public platformFeeRecipient;
-    
-    // Reentrancy guard
-    uint256 private _locked = 1;
-    
+    address public admin;
+
+    uint8 private _locked = 1;
+
+    // ------------------------
+    // Modifiers
+    // ------------------------
     modifier nonReentrant() {
-        require(_locked == 1, "ReentrancyGuard: reentrant call");
+        if (_locked != 1) revert Err_InvalidParams();
         _locked = 2;
         _;
         _locked = 1;
     }
-    
+
     modifier onlyOrganizer(uint256 eventId) {
-        require(_events[eventId].organizer == msg.sender, "Not event organizer");
+        if (_events[eventId].organizer != msg.sender) revert Err_NotOrganizer();
         _;
     }
-    
-    constructor(address _platformFeeRecipient) {
-        require(_platformFeeRecipient != address(0), "Invalid fee recipient");
-        platformFeeRecipient = _platformFeeRecipient;
+
+    modifier onlyAdmin() {
+        if (msg.sender != admin) revert Err_NotAdmin();
+        _;
     }
 
-    /**
-     * @dev Create a new event
-     * @param name Event name
-     * @param metadata IPFS hash containing event details
-     * @param maxSupply Maximum number of tickets
-     * @param price Price per ticket in wei
-     * @param startTime Event start timestamp
-     * @param endTime Event end timestamp
-     * @param transferable Whether tickets can be transferred
-     * @param royaltyBps Royalty percentage in basis points for secondary sales
-     */
+    modifier notBlacklisted() {
+        if (_blacklisted[msg.sender]) revert Err_Blacklisted();
+        _;
+    }
+
+    // ------------------------
+    // Constructor
+    // ------------------------
+    constructor(address _platformFeeRecipient) ERC1155() {
+        if (_platformFeeRecipient == address(0)) revert Err_InvalidFeeRecipient();
+        platformFeeRecipient = _platformFeeRecipient;
+        admin = msg.sender;
+    }
+
+    // ------------------------
+    // Create event (verifier optional)
+    // ------------------------
     function createEvent(
         string calldata name,
         string calldata metadata,
@@ -104,16 +131,17 @@ contract TicketMaster is ERC1155, ITicketMaster {
         uint256 startTime,
         uint256 endTime,
         bool transferable,
-        uint16 royaltyBps
+        bool dynamicPricing,
+        uint16 royaltyBps,
+        address verifier
     ) external returns (uint256 eventId) {
-        require(bytes(name).length > 0, "Name cannot be empty");
-        require(maxSupply > 0, "Max supply must be > 0");
-        require(startTime < endTime, "Invalid time range");
-        require(startTime > block.timestamp, "Start time must be in future");
-        require(royaltyBps <= 5000, "Royalty too high (max 50%)");
-        
+        if (bytes(name).length == 0 || maxSupply == 0) revert Err_InvalidParams();
+        if (startTime >= endTime) revert Err_InvalidParams();
+        if (royaltyBps > 5000) revert Err_InvalidParams();
+
+        // verifier is optional; do not revert if address(0)
+
         eventId = _eventIdCounter++;
-        
         _events[eventId] = Event({
             name: name,
             metadata: metadata,
@@ -125,296 +153,296 @@ contract TicketMaster is ERC1155, ITicketMaster {
             endTime: endTime,
             active: true,
             transferable: transferable,
+            dynamicPricing: dynamicPricing,
             royaltyBps: royaltyBps
         });
-        
-        _organizerEvents[msg.sender].push(eventId);
-        
+
+        // optional verifier
+        if (verifier != address(0)) {
+            _eventVerifiers[eventId] = verifier;
+        } else {
+            _eventVerifiers[eventId] = address(0);
+        }
+
         emit EventCreated(eventId, msg.sender, name, maxSupply, price);
-        
         return eventId;
     }
 
-    /**
-     * @dev Mint tickets for an event (primary sale)
-     * @param eventId The event ID
-     * @param quantity Number of tickets to mint
-     */
-
-
-     // here is the func mint ticket
-    function mintTicket(uint256 eventId, uint256 quantity)
-        external
-        payable
-        nonReentrant
-    {
+    // ------------------------
+    // Dynamic price (FIXED - safe math, no overflow)
+    // ------------------------
+    function getDynamicPrice(uint256 eventId) public view returns (uint256) {
         Event storage evt = _events[eventId];
-        
-        require(evt.organizer != address(0), "Event does not exist");
-        require(evt.active, "Event is not active");
-        require(evt.totalMinted + quantity <= evt.maxSupply, "Exceeds max supply");
-        require(msg.value == evt.price * quantity, "Incorrect payment amount");
-        require(quantity > 0, "Invalid quantity");
-        
-        // Calculate and distribute fees
-        uint256 platformFee = (msg.value * platformFeeBps) / 10000;
-        uint256 organizerAmount = msg.value - platformFee;
-        
-        // Update state before external calls
+        if (evt.organizer == address(0)) revert Err_EventNotExist();
+
+        // if dynamic pricing disabled, return base price
+        if (!evt.dynamicPricing) {
+            return evt.price;
+        }
+
+        // if maxSupply is zero, return base price (avoid division by zero)
+        if (evt.maxSupply == 0) {
+            return evt.price;
+        }
+
+        // if nothing minted yet — early bird price
+        if (evt.totalMinted == 0) {
+            return evt.price;
+        }
+
+        // FIXED: Safe calculation to avoid overflow
+        // Calculate demand ratio: (totalMinted / maxSupply) with proper scaling
+        // Using basis points (10000) for precision
+        uint256 demandBps = (evt.totalMinted * 10000) / evt.maxSupply;
+        if (demandBps > 10000) demandBps = 10000; // Cap at 100%
+
+        // Price increase: max 50% increase at full capacity
+        // priceIncrease = (price * demandBps * 50) / (10000 * 100)
+        // Simplified: (price * demandBps) / 20000
+        uint256 priceIncrease = (evt.price * demandBps) / 20000;
+
+        return evt.price + priceIncrease;
+    }
+
+    // ------------------------
+    // Mint - optimized & safe payment transfers
+    // ------------------------
+    function mintTicket(uint256 eventId, uint256 quantity) external payable nonReentrant notBlacklisted {
+        Event storage evt = _events[eventId];
+        if (evt.organizer == address(0)) revert Err_EventNotExist();
+        if (!evt.active) revert Err_EventNotActive();
+        if (quantity == 0 || quantity > 10) revert Err_InvalidParams();
+        if (evt.totalMinted + quantity > evt.maxSupply) revert Err_MaxSupplyExceeded();
+
+        uint256 currentPrice = getDynamicPrice(eventId);
+        uint256 totalPrice = currentPrice * quantity;
+        if (msg.value < totalPrice) revert Err_InsufficientPayment();
+
+        uint256 platformFee;
+        uint256 organizerAmount;
+        unchecked {
+            platformFee = (totalPrice * platformFeeBps) / 10000;
+            organizerAmount = totalPrice - platformFee;
+        }
+
+        // Batch update total minted
         evt.totalMinted += quantity;
-        
-        // Mint tickets
-        _mint(msg.sender, eventId, quantity, "");
-        
-        // Transfer funds
-        (bool success1, ) = platformFeeRecipient.call{value: platformFee}("");
-        require(success1, "Platform fee transfer failed");
-        
-        (bool success2, ) = evt.organizer.call{value: organizerAmount}("");
-        require(success2, "Organizer payment failed");
-        
-        emit TicketMinted(eventId, msg.sender, quantity, msg.value);
-    }
 
-    /**
-     * @dev Batch mint tickets for multiple buyers (organizer only)
-     * @param eventId The event ID
-     * @param recipients Array of recipient addresses
-     * @param quantities Array of quantities for each recipient
-     */
-    function batchMintTickets(
-        uint256 eventId,
-        address[] calldata recipients,
-        uint256[] calldata quantities
-    ) external onlyOrganizer(eventId) {
-        require(recipients.length == quantities.length, "Length mismatch");
-        require(recipients.length <= 50, "Too many recipients");
-        
-        Event storage evt = _events[eventId];
-        require(evt.active, "Event is not active");
-        
-        uint256 totalQuantity = 0;
-        for (uint256 i = 0; i < quantities.length; i++) {
-            totalQuantity += quantities[i];
+        // CRITICAL OPTIMIZATION: Minimize storage operations
+        uint256 startTicketId = _ticketIdCounter;
+        _ticketIdCounter += quantity;
+
+        // Use memory for temporary data
+        uint256 timestamp = block.timestamp;
+        address sender = msg.sender;
+
+        unchecked {
+            for (uint256 i = 0; i < quantity; ++i) {
+                uint256 ticketId = startTicketId + i;
+
+                bytes32 proofHash = keccak256(abi.encodePacked(eventId, ticketId, sender, timestamp));
+
+                _ticketProofs[ticketId] = TicketProof({
+                    eventId: eventId,
+                    originalOwner: sender,
+                    mintTimestamp: timestamp,
+                    proofHash: proofHash,
+                    isValid: true
+                });
+
+                _currentTicketOwner[ticketId] = sender;
+                _userTickets[eventId][sender].push(ticketId);
+            }
         }
-        
-        require(evt.totalMinted + totalQuantity <= evt.maxSupply, "Exceeds max supply");
-        
-        evt.totalMinted += totalQuantity;
-        
-        // Mint to each recipient
-        for (uint256 i = 0; i < recipients.length; i++) {
-            require(recipients[i] != address(0), "Invalid recipient");
-            require(quantities[i] > 0, "Invalid quantity");
-            _mint(recipients[i], eventId, quantities[i], "");
+
+        // Single ERC1155 mint for all tickets
+        _mint(sender, eventId, quantity, "");
+
+        // Pay platform fee (safe high-level call)
+        if (platformFee > 0) {
+            (bool okPf, ) = payable(platformFeeRecipient).call{value: platformFee}("");
+            if (!okPf) revert Err_PaymentFailed();
         }
+
+        // Pay organizer
+        if (organizerAmount > 0) {
+            (bool okOrg, ) = payable(evt.organizer).call{value: organizerAmount}("");
+            if (!okOrg) revert Err_PaymentFailed();
+        }
+
+        // Refund excess payment
+        unchecked {
+            uint256 excess = msg.value - totalPrice;
+            if (excess > 0) {
+                (bool refundOk, ) = payable(sender).call{value: excess}("");
+                if (!refundOk) revert Err_PaymentFailed();
+            }
+        }
+
+        emit TicketMinted(eventId, sender, quantity, totalPrice);
     }
 
-    /**
-     * @dev Burn/use tickets (e.g., when entering the venue)
-     * @param eventId The event ID
-     * @param quantity Number of tickets to burn
-     */
-    function burnTicket(uint256 eventId, uint256 quantity) external {
-        require(_events[eventId].organizer != address(0), "Event does not exist");
-        require(balanceOf[msg.sender][eventId] >= quantity, "Insufficient balance");
-        require(quantity > 0, "Invalid quantity");
-        
-        _burn(msg.sender, eventId, quantity);
-        
-        emit TicketBurned(eventId, msg.sender, quantity);
+    // ------------------------
+    // Ticket proof helpers
+    // ------------------------
+    function verifyTicket(uint256 ticketId, address owner) external view returns (bool, bytes32) {
+        TicketProof storage p = _ticketProofs[ticketId];
+        if (!p.isValid) return (false, p.proofHash);
+        if (_currentTicketOwner[ticketId] != owner) return (false, p.proofHash);
+        if (_usedTickets[p.eventId][ticketId]) return (false, p.proofHash);
+
+        return (true, p.proofHash);
     }
 
-    /**
-     * @dev Mark a ticket as used without burning (for validation/check-in)
-     * @param eventId The event ID
-     * @param tokenId The specific token ID to mark as used
-     */
-    function useTicket(uint256 eventId, uint256 tokenId)
-        external
-        onlyOrganizer(eventId)
-    {
-        require(!_usedTickets[eventId][tokenId], "Ticket already used");
-        _usedTickets[eventId][tokenId] = true;
-        
-        emit TicketUsed(eventId, msg.sender, tokenId);
+    // ------------------------
+    // Use tickets
+    // ------------------------
+    function useTicket(uint256 eventId, uint256 ticketId, address owner) external onlyOrganizer(eventId) {
+        TicketProof storage p = _ticketProofs[ticketId];
+        if (!p.isValid || p.eventId != eventId) revert Err_TicketInvalid();
+        if (_usedTickets[eventId][ticketId]) revert Err_TicketUsed();
+        if (_currentTicketOwner[ticketId] != owner) revert Err_NotTicketOwner();
+        if (balanceOf[owner][eventId] == 0) revert Err_InvalidParams();
+
+        _usedTickets[eventId][ticketId] = true;
+        emit TicketUsed(eventId, owner, ticketId);
     }
 
-    /**
-     * @dev Transfer tickets with royalty payment (secondary market)
-     * @param from Sender address
-     * @param to Recipient address
-     * @param eventId Event ID
-     * @param quantity Number of tickets
-     */
+    // ------------------------
+    // Transfer with royalty - OPTIMIZED & safer
+    // ------------------------
     function safeTransferFromWithRoyalty(
         address from,
         address to,
         uint256 eventId,
-        uint256 quantity
-    ) external payable nonReentrant {
+        uint256 quantity,
+        uint256[] calldata ticketIds
+    ) external payable nonReentrant notBlacklisted {
         Event storage evt = _events[eventId];
-        require(evt.transferable, "Tickets are non-transferable");
-        require(evt.organizer != address(0), "Event does not exist");
-        
-        // Calculate royalty
-        uint256 royaltyAmount = (msg.value * evt.royaltyBps) / 10000;
-        uint256 sellerAmount = msg.value - royaltyAmount;
-        
-        // Transfer the ticket
-        require(
-            msg.sender == from || isApprovedForAll[from][msg.sender],
-            "Not approved"
-        );
-        require(to != address(0), "Invalid recipient");
-        
-        balanceOf[from][eventId] -= quantity;
-        balanceOf[to][eventId] += quantity;
-        
-        emit TransferSingle(msg.sender, from, to, eventId, quantity);
-        
-        // Pay royalty to organizer
-        if (royaltyAmount > 0) {
-            (bool success1, ) = evt.organizer.call{value: royaltyAmount}("");
-            require(success1, "Royalty payment failed");
-            emit RoyaltyPaid(eventId, from, evt.organizer, royaltyAmount);
+        if (!evt.transferable) revert Err_TransferNotAllowed();
+        if (evt.organizer == address(0)) revert Err_EventNotExist();
+        if (_blacklisted[to]) revert Err_Blacklisted();
+        if (ticketIds.length != quantity) revert Err_InvalidParams();
+        if (msg.sender != from && !isApprovedForAll[from][msg.sender]) revert Err_UnsafeTransfer();
+
+        // Optimized validation loop
+        unchecked {
+            for (uint256 i = 0; i < quantity; ++i) {
+                uint256 ticketId = ticketIds[i];
+                TicketProof storage p = _ticketProofs[ticketId];
+
+                if (!p.isValid || p.eventId != eventId) revert Err_TicketInvalid();
+                if (_usedTickets[eventId][ticketId]) revert Err_TicketInvalid();
+                if (_currentTicketOwner[ticketId] != from) revert Err_NotTicketOwner();
+
+                // Update ownership
+                _currentTicketOwner[ticketId] = to;
+                
+                // FIXED: Safe increment to prevent overflow
+                if (_ticketTransferCount[ticketId] < type(uint8).max) {
+                    _ticketTransferCount[ticketId]++;
+                }
+
+                // Update user tickets arrays
+                _removeUserTicket(eventId, from, ticketId);
+                _userTickets[eventId][to].push(ticketId);
+            }
         }
-        
-        // Pay seller
-        if (sellerAmount > 0) {
-            (bool success2, ) = from.call{value: sellerAmount}("");
-            require(success2, "Seller payment failed");
+
+        _safeTransferFrom(from, to, eventId, quantity, "");
+
+        // Handle payments only if value sent
+        if (msg.value > 0) {
+            uint256 royaltyAmount;
+            uint256 sellerAmount;
+
+            unchecked {
+                royaltyAmount = (msg.value * evt.royaltyBps) / 10000;
+                sellerAmount = msg.value - royaltyAmount;
+            }
+
+            if (royaltyAmount > 0) {
+                (bool okR, ) = payable(evt.organizer).call{value: royaltyAmount}("");
+                if (!okR) revert Err_RoyaltyPaymentFailed();
+                emit RoyaltyPaid(eventId, from, evt.organizer, royaltyAmount);
+            }
+
+            if (sellerAmount > 0) {
+                (bool okS, ) = payable(from).call{value: sellerAmount}("");
+                if (!okS) revert Err_PaymentFailed();
+            }
         }
-        
-        // Safe transfer check
-        if (to.code.length > 0) {
-            require(
-                IERC1155TokenReceiver(to).onERC1155Received(
-                    msg.sender, from, eventId, quantity, ""
-                ) == IERC1155TokenReceiver.onERC1155Received.selector,
-                "Unsafe transfer"
-            );
+    }
+
+    function _removeUserTicket(uint256 eventId, address user, uint256 ticketId) private {
+        uint256[] storage tickets = _userTickets[eventId][user];
+        uint256 len = tickets.length;
+        unchecked {
+            for (uint256 i = 0; i < len; ++i) {
+                if (tickets[i] == ticketId) {
+                    tickets[i] = tickets[len - 1];
+                    tickets.pop();
+                    return;
+                }
+            }
         }
     }
 
-    /**
-     * @dev Set event active status
-     * @param eventId The event ID
-     * @param active New active status
-     */
-    function setEventStatus(uint256 eventId, bool active)
-        external
-        onlyOrganizer(eventId)
-    {
-        _events[eventId].active = active;
-        emit EventStatusChanged(eventId, active);
+    // ------------------------
+    // Admin / blacklist / fraud
+    // ------------------------
+    function invalidateTicket(uint256 ticketId, string calldata reason) external {
+        TicketProof storage p = _ticketProofs[ticketId];
+        uint256 eventId = p.eventId;
+        if (!(msg.sender == admin || msg.sender == _events[eventId].organizer)) revert Err_NotAdmin();
+        if (!p.isValid) revert Err_TicketInvalid();
+
+        p.isValid = false;
+        emit TicketInvalidated(eventId, ticketId, reason);
+        emit FraudAttemptDetected(eventId, ticketId, address(0), reason);
     }
 
-    /**
-     * @dev Update event metadata
-     * @param eventId The event ID
-     * @param metadata New IPFS hash
-     */
-    function updateEventMetadata(uint256 eventId, string calldata metadata)
-        external
-        onlyOrganizer(eventId)
-    {
-        require(bytes(metadata).length > 0, "Invalid metadata");
-        _events[eventId].metadata = metadata;
+    function blacklistAddress(address user, bool blacklisted) external onlyAdmin {
+        _blacklisted[user] = blacklisted;
     }
 
-    /**
-     * @dev Update platform fee (owner only - you'd add Ownable pattern)
-     * @param newFeeBps New fee in basis points
-     */
-    function updatePlatformFee(uint16 newFeeBps) external {
-        require(msg.sender == platformFeeRecipient, "Not authorized");
-        require(newFeeBps <= 1000, "Fee too high (max 10%)");
-        platformFeeBps = newFeeBps;
+    function reportFraud(uint256 eventId, uint256 ticketId, address suspected, string calldata reason) external {
+        emit FraudAttemptDetected(eventId, ticketId, suspected, reason);
     }
 
-    /**
-     * @dev Emergency withdraw for organizer (only before event starts)
-     * @param eventId The event ID
-     */
-    function emergencyWithdraw(uint256 eventId)
-        external
-        onlyOrganizer(eventId)
-    {
-        Event storage evt = _events[eventId];
-        require(block.timestamp < evt.startTime, "Event already started");
-        require(evt.totalMinted == 0, "Tickets already sold");
-        
-        evt.active = false;
-        emit EventStatusChanged(eventId, false);
-    }
-
-    // View functions
-    
-    function getEvent(uint256 eventId)
-        external
-        view
-        returns (Event memory)
-    {
+    // ------------------------
+    // Helpers
+    // ------------------------
+    function getEvent(uint256 eventId) external view returns (Event memory) {
         return _events[eventId];
     }
 
-    function getEventsByOrganizer(address organizer)
-        external
-        view
-        returns (uint256[] memory)
-    {
-        return _organizerEvents[organizer];
+    function getTicketProof(uint256 ticketId) external view returns (TicketProof memory) {
+        return _ticketProofs[ticketId];
     }
 
-    function isTicketUsed(uint256 eventId, uint256 tokenId)
-        external
-        view
-        returns (bool)
-    {
-        return _usedTickets[eventId][tokenId];
+    function getUserTickets(uint256 eventId, address user) external view returns (uint256[] memory) {
+        return _userTickets[eventId][user];
     }
 
-    function getAvailableTickets(uint256 eventId)
-        external
-        view
-        returns (uint256)
-    {
+    function getAvailableTickets(uint256 eventId) external view returns (uint256) {
         Event storage evt = _events[eventId];
-        return evt.maxSupply - evt.totalMinted;
+        unchecked {
+            return evt.maxSupply - evt.totalMinted;
+        }
     }
 
-    function uri(uint256 eventId)
-        public
-        view
-        override
-        returns (string memory)
-    {
-        Event storage evt = _events[eventId];
-        require(evt.organizer != address(0), "Event does not exist");
-        return evt.metadata;
+    function isTicketUsed(uint256 eventId, uint256 ticketId) external view returns (bool) {
+        return _usedTickets[eventId][ticketId];
     }
 
-    // ERC2981 Royalty Standard support
-    function royaltyInfo(uint256 eventId, uint256 salePrice)
-        external
-        view
-        returns (address receiver, uint256 royaltyAmount)
-    {
-        Event storage evt = _events[eventId];
-        receiver = evt.organizer;
-        royaltyAmount = (salePrice * evt.royaltyBps) / 10000;
+    function isAddressBlacklisted(address user) external view returns (bool) {
+        return _blacklisted[user];
     }
 
-    function supportsInterface(bytes4 interfaceId)
-        public
-        pure
-        override
-        returns (bool)
-    {
-        return interfaceId == 0x01ffc9a7 // ERC165
-            || interfaceId == 0xd9b67a26 // ERC1155
-            || interfaceId == 0x0e89341c // ERC1155MetadataURI
-            || interfaceId == 0x2a55205a; // ERC2981 Royalty
-    }
+    // ------------------------
+    // Receive ETH
+    // ------------------------
+    receive() external payable {}
+    fallback() external payable {}
 }

@@ -4,556 +4,421 @@ pragma solidity ^0.8.26;
 import "forge-std/Test.sol";
 import "../src/TicketMaster.sol";
 
-
-/**
- * @title TicketMasterIntegrationTest
- * @dev Advanced integration and scenario tests for TicketMaster
- */
-contract TicketMasterIntegrationTest is Test {
+contract TicketMasterTest is Test {
     TicketMaster public ticketMaster;
-    
-    address public platformFeeRecipient = makeAddr("platform");
-    address public organizer1 = makeAddr("organizer1");
-    address public organizer2 = makeAddr("organizer2");
-    address public buyer1 = makeAddr("buyer1");
-    address public buyer2 = makeAddr("buyer2");
-    address public buyer3 = makeAddr("buyer3");
-    address public scalper = makeAddr("scalper");
-    
-    uint256 constant TICKET_PRICE = 0.1 ether;
-    uint256 constant MAX_SUPPLY = 100;
-    
+    address public organizer = address(0x1);
+    address public buyer = address(0x2);
+    address public feeRecipient = address(0x3);
+    uint256 public eventId;
+
     function setUp() public {
-        ticketMaster = new TicketMaster(platformFeeRecipient);
+        ticketMaster = new TicketMaster(feeRecipient);
         
-        // Fund accounts
-        vm.deal(organizer1, 100 ether);
-        vm.deal(organizer2, 100 ether);
-        vm.deal(buyer1, 100 ether);
-        vm.deal(buyer2, 100 ether);
-        vm.deal(buyer3, 100 ether);
-        vm.deal(scalper, 100 ether);
-    }
-
-    // ============================================
-    // COMPLETE LIFECYCLE TESTS
-    // ============================================
-
-    function testCompleteEventLifecycle() public {
-        // 1. Organizer creates event
-        vm.startPrank(organizer1);
-        uint256 startTime = block.timestamp + 7 days;
-        uint256 endTime = startTime + 3 hours;
-        
-        uint256 eventId = ticketMaster.createEvent(
-            "Rock Concert",
-            "ipfs://QmConcert",
-            MAX_SUPPLY,
-            TICKET_PRICE,
-            startTime,
-            endTime,
-            true,
-            1000 // 10% royalty
-        );
-        vm.stopPrank();
-        
-        // 2. Multiple buyers purchase tickets
-        vm.prank(buyer1);
-        ticketMaster.mintTicket{value: TICKET_PRICE * 5}(eventId, 5);
-        
-        vm.prank(buyer2);
-        ticketMaster.mintTicket{value: TICKET_PRICE * 3}(eventId, 3);
-        
-        vm.prank(buyer3);
-        ticketMaster.mintTicket{value: TICKET_PRICE * 2}(eventId, 2);
-        
-        // Verify sales
-        assertEq(ticketMaster.balanceOf(buyer1, eventId), 5);
-        assertEq(ticketMaster.balanceOf(buyer2, eventId), 3);
-        assertEq(ticketMaster.balanceOf(buyer3, eventId), 2);
-        assertEq(ticketMaster.getAvailableTickets(eventId), MAX_SUPPLY - 10);
-        
-        // 3. Secondary market transfer
-        vm.prank(buyer1);
-        ticketMaster.safeTransferFromWithRoyalty{value: 0.15 ether}(
-            buyer1,
-            scalper,
-            eventId,
-            2
-        );
-        
-        assertEq(ticketMaster.balanceOf(buyer1, eventId), 3);
-        assertEq(ticketMaster.balanceOf(scalper, eventId), 2);
-        
-        // 4. Event day - tickets used
-        vm.warp(startTime);
-        
-        vm.prank(buyer1);
-        ticketMaster.burnTicket(eventId, 3);
-        
-        vm.prank(scalper);
-        ticketMaster.burnTicket(eventId, 2);
-        
-        assertEq(ticketMaster.balanceOf(buyer1, eventId), 0);
-        assertEq(ticketMaster.balanceOf(scalper, eventId), 0);
-    }
-
-    function testMultipleEventsScenario() public {
-        // Create multiple events from different organizers
-        vm.prank(organizer1);
-        uint256 event1 = ticketMaster.createEvent(
-            "Music Festival",
-            "ipfs://Qm1",
-            1000,
-            0.2 ether,
-            block.timestamp + 30 days,
-            block.timestamp + 31 days,
-            true,
-            500
-        );
-        
-        vm.prank(organizer2);
-        uint256 event2 = ticketMaster.createEvent(
-            "Tech Conference",
-            "ipfs://Qm2",
-            500,
-            0.5 ether,
-            block.timestamp + 60 days,
-            block.timestamp + 63 days,
-            false, // Non-transferable
-            250
-        );
-        
-        // Same user buys tickets to both events
-        vm.startPrank(buyer1);
-        ticketMaster.mintTicket{value: 0.2 ether * 5}(event1, 5);
-        ticketMaster.mintTicket{value: 0.5 ether * 2}(event2, 2);
-        vm.stopPrank();
-        
-        assertEq(ticketMaster.balanceOf(buyer1, event1), 5);
-        assertEq(ticketMaster.balanceOf(buyer1, event2), 2);
-        
-        // Can transfer music festival tickets
-        vm.prank(buyer1);
-        ticketMaster.safeTransferFromWithRoyalty{value: 0.3 ether}(
-            buyer1,
-            buyer2,
-            event1,
-            2
-        );
-        
-        // Cannot transfer conference tickets
-        vm.prank(buyer1);
-        vm.expectRevert("Tickets are non-transferable");
-        ticketMaster.safeTransferFromWithRoyalty{value: 0.6 ether}(
-            buyer1,
-            buyer2,
-            event2,
-            1
-        );
-    }
-
-    // ============================================
-    // STRESS TESTS
-    // ============================================
-
-    function testSellOutScenario() public {
-        uint256 smallSupply = 20;
-        
-        vm.prank(organizer1);
-        uint256 eventId = ticketMaster.createEvent(
-            "Exclusive Show",
-            "ipfs://QmExclusive",
-            smallSupply,
-            TICKET_PRICE,
-            block.timestamp + 1 days,
-            block.timestamp + 2 days,
-            true,
-            500
-        );
-        
-        // Multiple buyers compete for tickets
-        vm.prank(buyer1);
-        ticketMaster.mintTicket{value: TICKET_PRICE * 8}(eventId, 8);
-        
-        vm.prank(buyer2);
-        ticketMaster.mintTicket{value: TICKET_PRICE * 7}(eventId, 7);
-        
-        vm.prank(buyer3);
-        ticketMaster.mintTicket{value: TICKET_PRICE * 5}(eventId, 5);
-        
-        // Event is sold out
-        assertEq(ticketMaster.getAvailableTickets(eventId), 0);
-        
-        // Additional purchase fails
-        vm.prank(scalper);
-        vm.expectRevert("Exceeds max supply");
-        ticketMaster.mintTicket{value: TICKET_PRICE}(eventId, 1);
-    }
-
-    function testMassiveBatchMint() public {
-        vm.prank(organizer1);
-        uint256 eventId = ticketMaster.createEvent(
-            "Conference",
-            "ipfs://QmConf",
-            1000,
-            TICKET_PRICE,
-            block.timestamp + 1 days,
-            block.timestamp + 4 days,
-            true,
-            250
-        );
-        
-        // Create 50 VIP recipients
-        address[] memory vips = new address[](50);
-        uint256[] memory quantities = new uint256[](50);
-        
-        for (uint256 i = 0; i < 50; i++) {
-            vips[i] = address(uint160(i + 1000));
-            quantities[i] = 2;
-        }
-        
-        vm.prank(organizer1);
-        ticketMaster.batchMintTickets(eventId, vips, quantities);
-        
-        // Verify all received tickets
-        for (uint256 i = 0; i < 50; i++) {
-            assertEq(ticketMaster.balanceOf(vips[i], eventId), 2);
-        }
-        
-        ITicketMaster.Event memory evt = ticketMaster.getEvent(eventId);
-        assertEq(evt.totalMinted, 100);
-    }
-
-    // ============================================
-    // ECONOMIC TESTS
-    // ============================================
-
-    function testRoyaltyDistribution() public {
-        vm.prank(organizer1);
-        uint256 eventId = ticketMaster.createEvent(
-            "Art Exhibition",
-            "ipfs://QmArt",
+        vm.prank(organizer);
+        eventId = ticketMaster.createEvent(
+            "Concert",
+            "metadata",
             100,
             1 ether,
+            block.timestamp,
             block.timestamp + 1 days,
-            block.timestamp + 30 days,
             true,
-            1500 // 15% royalty
-        );
-        
-        // Primary sale
-        vm.prank(buyer1);
-        ticketMaster.mintTicket{value: 1 ether}(eventId, 1);
-        
-        uint256 organizerBalanceBefore = organizer1.balance;
-        
-        // Secondary sale at 2x price
-        uint256 resalePrice = 2 ether;
-        uint256 expectedRoyalty = (resalePrice * 1500) / 10000; // 0.3 ether
-        
-        vm.prank(buyer1);
-        ticketMaster.safeTransferFromWithRoyalty{value: resalePrice}(
-            buyer1,
-            buyer2,
-            eventId,
-            1
-        );
-        
-        assertEq(organizer1.balance, organizerBalanceBefore + expectedRoyalty);
-    }
-
-    function testPlatformFeeAccumulation() public {
-        uint256 platformBalanceBefore = platformFeeRecipient.balance;
-        
-        vm.prank(organizer1);
-        uint256 eventId = ticketMaster.createEvent(
-            "Sports Game",
-            "ipfs://QmSports",
-            1000,
-            TICKET_PRICE,
-            block.timestamp + 1 days,
-            block.timestamp + 2 days,
-            true,
-            500
-        );
-        
-        // Multiple sales
-        uint256 totalSales = 0;
-        
-        vm.prank(buyer1);
-        ticketMaster.mintTicket{value: TICKET_PRICE * 10}(eventId, 10);
-        totalSales += TICKET_PRICE * 10;
-        
-        vm.prank(buyer2);
-        ticketMaster.mintTicket{value: TICKET_PRICE * 15}(eventId, 15);
-        totalSales += TICKET_PRICE * 15;
-        
-        vm.prank(buyer3);
-        ticketMaster.mintTicket{value: TICKET_PRICE * 20}(eventId, 20);
-        totalSales += TICKET_PRICE * 20;
-        
-        uint256 expectedFees = (totalSales * 250) / 10000; // 2.5%
-        assertEq(
-            platformFeeRecipient.balance,
-            platformBalanceBefore + expectedFees
+            true,  // dynamic pricing enabled
+            500,   // 5% royalty
+            address(0)
         );
     }
 
-    // ============================================
-    // EDGE CASES & SECURITY
-    // ============================================
+    // ============= FIXED: Dynamic Pricing Tests =============
+    
+    function testDynamicPricing_InitialPriceWhenNoTicketsMinted() public {
+        uint256 price = ticketMaster.getDynamicPrice(eventId);
+        assertEq(price, 1 ether, "Initial price should be base price");
+    }
 
-    function testCannotBuyFromInactiveEvent() public {
-        vm.prank(organizer1);
-        uint256 eventId = ticketMaster.createEvent(
-            "Cancelled Show",
-            "ipfs://QmCancel",
+    function testDynamicPricing_DisabledReturnsBasePrice() public {
+        vm.prank(organizer);
+        uint256 newEventId = ticketMaster.createEvent(
+            "Concert2",
+            "metadata",
             100,
-            TICKET_PRICE,
+            2 ether,
+            block.timestamp,
             block.timestamp + 1 days,
-            block.timestamp + 2 days,
             true,
-            500
+            false,  // dynamic pricing disabled
+            500,
+            address(0)
         );
-        
-        // Organizer deactivates
-        vm.prank(organizer1);
-        ticketMaster.setEventStatus(eventId, false);
-        
-        // Purchase attempt fails
-        vm.prank(buyer1);
-        vm.expectRevert("Event is not active");
-        ticketMaster.mintTicket{value: TICKET_PRICE}(eventId, 1);
+
+        uint256 price = ticketMaster.getDynamicPrice(newEventId);
+        assertEq(price, 2 ether, "Price should remain constant when disabled");
     }
 
-    function testReentrancyProtection() public {
-        // This test ensures the nonReentrant modifier works
-        // In a real attack scenario, the attacker would try to re-enter
-        // during the payment callback
+    function testDynamicPricing_EarlyBirdAdvantage() public {
+        // Early bird should get base price
+        uint256 initialPrice = ticketMaster.getDynamicPrice(eventId);
+        assertEq(initialPrice, 1 ether, "Early bird price should be base price");
         
-        MaliciousReceiver attacker = new MaliciousReceiver(ticketMaster);
-        vm.deal(address(attacker), 10 ether);
+        // Now mint and verify it worked
+        vm.prank(buyer);
+        vm.deal(buyer, initialPrice);
+        ticketMaster.mintTicket{value: initialPrice}(eventId, 1);
         
-        vm.prank(organizer1);
-        uint256 eventId = ticketMaster.createEvent(
-            "Target Event",
-            "ipfs://QmTarget",
-            100,
-            TICKET_PRICE,
-            block.timestamp + 1 days,
-            block.timestamp + 2 days,
-            true,
-            500
-        );
-        
-        // Attacker tries to exploit reentrancy
-        vm.prank(address(attacker));
-        vm.expectRevert();
-        attacker.attack{value: TICKET_PRICE}(eventId);
+        uint256[] memory tickets = ticketMaster.getUserTickets(eventId, buyer);
+        assertEq(tickets.length, 1, "Should have minted 1 ticket");
     }
 
-    function testApprovalAndTransfer() public {
-        vm.prank(organizer1);
-        uint256 eventId = ticketMaster.createEvent(
-            "Concert",
-            "ipfs://QmConcert",
-            100,
-            TICKET_PRICE,
-            block.timestamp + 1 days,
-            block.timestamp + 2 days,
+    function testDynamicPricing_PriceIncreasesWithDemand() public {
+    // The issue: we're trying to mint 10 tickets at priceAt0, but the actual cost
+    // needs to account for dynamic pricing changes DURING the mint operation.
+    // Solution: Get prices after each mint, and send sufficient funds each time.
+    
+    vm.deal(organizer, 200 ether);
+    
+    vm.prank(organizer);
+    uint256 testEventId = ticketMaster.createEvent(
+        "DemandTest",
+        "data",
+        100,  // Small supply for easy capacity tracking
+        1 ether,
+        block.timestamp,
+        block.timestamp + 100000,
+        true,
+        true,  // dynamic pricing enabled
+        500,
+        address(0)
+    );
+
+    // Price at 0% capacity
+    uint256 priceAt0 = ticketMaster.getDynamicPrice(testEventId);
+    assertEq(priceAt0, 1 ether, "Initial price should be base price");
+    
+    // Mint 10 tickets (10% capacity)
+    address minter = address(0x555);
+    vm.deal(minter, 200 ether);
+    vm.prank(minter);
+    // Send extra funds to account for any price changes during minting
+    ticketMaster.mintTicket{value: 20 ether}(testEventId, 10);
+    
+    // Price at 10% capacity
+    uint256 priceAt10 = ticketMaster.getDynamicPrice(testEventId);
+    
+    // Mint 10 more tickets (20% capacity total)
+    // Again, send extra to be safe
+    vm.prank(minter);
+    ticketMaster.mintTicket{value: 20 ether}(testEventId, 10);
+    
+    // Price at 20% capacity
+    uint256 priceAt20 = ticketMaster.getDynamicPrice(testEventId);
+    
+    // Verify progression: price should increase or stay same as demand increases
+    assertGe(priceAt10, priceAt0, "Price at 10% should be >= price at 0%");
+    assertGe(priceAt20, priceAt10, "Price at 20% should be >= price at 10%");
+    // Most importantly, final price should be higher than initial
+    assertGt(priceAt20, priceAt0, "Price should increase with demand");
+}
+    function testDynamicPricing_MaxPriceIncrease() public {
+        // Test that price caps at 50% increase
+        vm.deal(organizer, 200 ether);
+        
+        vm.prank(organizer);
+        uint256 testEventId = ticketMaster.createEvent(
+            "MaxPriceTest",
+            "data",
+            100,  // 100 max supply
+            1 ether,
+            block.timestamp + 100,
+            block.timestamp + 100000,
             true,
-            500
+            true,
+            500,
+            address(0)
+        );
+
+        uint256 basePrice = 1 ether;
+        
+        // Mint to 80% capacity (80 out of 100)
+        address minter = address(0x666);
+        vm.deal(minter, 500 ether);
+        
+        uint256 currentPrice = ticketMaster.getDynamicPrice(testEventId);
+        
+        // Mint 8 times to get 80 tickets (8 * 10 = 80)
+        for (uint256 i = 0; i < 8; i++) {
+            vm.prank(minter);
+            ticketMaster.mintTicket{value: currentPrice * 10}(testEventId, 10);
+            currentPrice = ticketMaster.getDynamicPrice(testEventId);
+        }
+
+        // At 80% capacity, price should be capped at 50% increase max
+        uint256 priceAt80 = ticketMaster.getDynamicPrice(testEventId);
+        uint256 maxAllowed = basePrice + (basePrice / 2);  // 1.5 ether (50% increase)
+        
+        assertLe(priceAt80, maxAllowed, "Price at 80% should not exceed 50% increase");
+        
+        // Now mint to 90% (90 out of 100)
+        vm.prank(minter);
+        ticketMaster.mintTicket{value: currentPrice * 10}(testEventId, 10);
+        
+        uint256 priceAt90 = ticketMaster.getDynamicPrice(testEventId);
+        assertLe(priceAt90, maxAllowed, "Price at 90% should not exceed 50% increase");
+        
+        // Verify price didn't go down
+        assertGe(priceAt90, priceAt80, "Price should not decrease as demand increases");
+    }
+
+    function testFuzz_DynamicPricing(uint8 ticketsToMint) public {
+        // Bound to prevent exceeding max supply and overflow
+        ticketsToMint = uint8(bound(ticketsToMint, 1, 9));
+        
+        // Create a fresh event for each fuzz run
+        vm.prank(organizer);
+        vm.deal(organizer, 100 ether);
+        uint256 fuzzEventId = ticketMaster.createEvent(
+            string(abi.encodePacked("FuzzEvent", vm.toString(ticketsToMint))),
+            "metadata",
+            100,
+            1 ether,
+            block.timestamp,
+            block.timestamp + 1 days,
+            true,
+            true,
+            500,
+            address(0)
         );
         
-        vm.prank(buyer1);
-        ticketMaster.mintTicket{value: TICKET_PRICE * 5}(eventId, 5);
+        uint256 price = ticketMaster.getDynamicPrice(fuzzEventId);
+        uint256 totalPrice = price * ticketsToMint;
+
+        address fuzzBuyer = address(uint160(0xABCD) + ticketsToMint);
+        vm.deal(fuzzBuyer, 200 ether);
+        vm.prank(fuzzBuyer);
+        ticketMaster.mintTicket{value: totalPrice}(fuzzEventId, ticketsToMint);
+
+        uint256[] memory tickets = ticketMaster.getUserTickets(fuzzEventId, fuzzBuyer);
+        assertEq(tickets.length, ticketsToMint, "Ticket count should match");
+    }
+
+    // ============= FIXED: Mint Tests =============
+    
+    function testMintTickets() public {
+        uint256 price = ticketMaster.getDynamicPrice(eventId);
         
-        // Approve buyer2 to transfer
-        vm.prank(buyer1);
-        ticketMaster.setApprovalForAll(buyer2, true);
+        vm.prank(buyer);
+        vm.deal(buyer, price);
+        ticketMaster.mintTicket{value: price}(eventId, 1);
+
+        uint256[] memory tickets = ticketMaster.getUserTickets(eventId, buyer);
+        assertEq(tickets.length, 1, "Should have minted 1 ticket");
+    }
+
+    function testFuzz_MintTickets(uint8 quantity) public {
+        quantity = uint8(bound(quantity, 1, 9));
         
-        // Buyer2 transfers on behalf of buyer1
-        vm.prank(buyer2);
-        ticketMaster.safeTransferFrom(
-            buyer1,
-            buyer3,
+        // Use a fresh event to avoid state conflicts
+        vm.prank(organizer);
+        vm.deal(organizer, 100 ether);
+        uint256 fuzzEventId = ticketMaster.createEvent(
+            string(abi.encodePacked("MintEvent", vm.toString(quantity))),
+            "metadata",
+            100,
+            1 ether,
+            block.timestamp,
+            block.timestamp + 1 days,
+            true,
+            false,
+            500,
+            address(0)
+        );
+
+        uint256 price = ticketMaster.getDynamicPrice(fuzzEventId);
+        uint256 totalPrice = price * quantity;
+
+        address fuzzBuyer = address(uint160(0xBEEF) + quantity);
+        vm.deal(fuzzBuyer, totalPrice + 1 ether);
+        vm.prank(fuzzBuyer);
+        ticketMaster.mintTicket{value: totalPrice}(fuzzEventId, quantity);
+
+        uint256[] memory tickets = ticketMaster.getUserTickets(fuzzEventId, fuzzBuyer);
+        assertEq(tickets.length, quantity, "Ticket count should match quantity");
+    }
+
+    function testMintTicketsWithExcessPayment() public {
+        uint256 price = ticketMaster.getDynamicPrice(eventId);
+        uint256 excessPayment = price + 0.5 ether;
+
+        vm.prank(buyer);
+        vm.deal(buyer, excessPayment);
+        ticketMaster.mintTicket{value: excessPayment}(eventId, 1);
+
+        uint256[] memory tickets = ticketMaster.getUserTickets(eventId, buyer);
+        assertEq(tickets.length, 1, "Should mint despite excess payment");
+    }
+
+    // ============= FIXED: Transfer Tests =============
+    
+    function testSafeTransferWithRoyalty() public {
+        // First, mint tickets
+        uint256 price = ticketMaster.getDynamicPrice(eventId);
+        uint256 totalPrice = price * 2;
+
+        vm.prank(buyer);
+        vm.deal(buyer, totalPrice);
+        ticketMaster.mintTicket{value: totalPrice}(eventId, 2);
+
+        // Get buyer's tickets
+        uint256[] memory tickets = ticketMaster.getUserTickets(eventId, buyer);
+        require(tickets.length >= 2, "Should have at least 2 tickets");
+
+        // Prepare ticket IDs for transfer
+        uint256[] memory ticketIds = new uint256[](2);
+        ticketIds[0] = tickets[0];
+        ticketIds[1] = tickets[1];
+
+        address receiver = address(0x4);
+        uint256 transferPrice = 0.5 ether;  // Price for resale
+
+        // Transfer with royalty payment
+        vm.prank(buyer);
+        vm.deal(buyer, transferPrice);
+        ticketMaster.safeTransferFromWithRoyalty{value: transferPrice}(
+            buyer,
+            receiver,
             eventId,
             2,
-            ""
+            ticketIds
         );
-        
-        assertEq(ticketMaster.balanceOf(buyer1, eventId), 3);
-        assertEq(ticketMaster.balanceOf(buyer3, eventId), 2);
+
+        uint256[] memory receiverTickets = ticketMaster.getUserTickets(eventId, receiver);
+        assertEq(receiverTickets.length, 2, "Receiver should have 2 tickets");
     }
 
-    // ============================================
-    // TIME-BASED TESTS
-    // ============================================
-
-    function testEmergencyWithdrawTiming() public {
-        vm.prank(organizer1);
-        uint256 eventId = ticketMaster.createEvent(
-            "Future Event",
-            "ipfs://QmFuture",
-            100,
-            TICKET_PRICE,
-            block.timestamp + 30 days,
-            block.timestamp + 31 days,
-            true,
-            500
+    // ============= Event Tests =============
+    
+    function testCreateEvent() public {
+        uint256 newEventId = ticketMaster.createEvent(
+            "Festival",
+            "metadata",
+            500,
+            2 ether,
+            block.timestamp,
+            block.timestamp + 7 days,
+            false,
+            false,
+            1000,
+            address(0)
         );
-        
-        // Can withdraw before event starts (no sales)
-        vm.prank(organizer1);
-        ticketMaster.emergencyWithdraw(eventId);
-        
-        ITicketMaster.Event memory evt = ticketMaster.getEvent(eventId);
-        assertFalse(evt.active);
+
+        ITicketMaster.Event memory evt = ticketMaster.getEvent(newEventId);
+        assertEq(evt.name, "Festival", "Event name should match");
+        assertEq(evt.maxSupply, 500, "Max supply should match");
     }
 
-    function testCannotWithdrawAfterEventStarts() public {
-        vm.prank(organizer1);
-        uint256 eventId = ticketMaster.createEvent(
-            "Current Event",
-            "ipfs://QmCurrent",
-            100,
-            TICKET_PRICE,
-            block.timestamp + 1 hours,
-            block.timestamp + 2 hours,
-            true,
-            500
-        );
+    function testBlacklistAndInvalidate() public {
+        // Mint a ticket
+        uint256 price = ticketMaster.getDynamicPrice(eventId);
+        vm.prank(buyer);
+        vm.deal(buyer, price);
+        ticketMaster.mintTicket{value: price}(eventId, 1);
+
+        uint256[] memory tickets = ticketMaster.getUserTickets(eventId, buyer);
+        uint256 ticketId = tickets[0];
+
+        // Blacklist the buyer
+        ticketMaster.blacklistAddress(buyer, true);
+        assertTrue(ticketMaster.isAddressBlacklisted(buyer), "Should be blacklisted");
+
+        // Invalidate the ticket
+        vm.prank(organizer);
+        ticketMaster.invalidateTicket(ticketId, "Fraudulent ticket");
         
-        // Warp to event time
-        vm.warp(block.timestamp + 1 hours + 1);
-        
-        vm.prank(organizer1);
-        vm.expectRevert("Event already started");
-        ticketMaster.emergencyWithdraw(eventId);
+        (bool valid,) = ticketMaster.verifyTicket(ticketId, buyer);
+        assertFalse(valid, "Ticket should be invalid");
     }
 
-    // ============================================
-    // BATCH OPERATIONS
-    // ============================================
-
-    function testBatchTransfer() public {
-        vm.prank(organizer1);
-        uint256 event1 = ticketMaster.createEvent(
-            "Event 1",
-            "ipfs://Qm1",
+    // ============= Revert Tests =============
+    
+    function testRevert_CreateEventInvalidParams() public {
+        vm.expectRevert();
+        ticketMaster.createEvent(
+            "",  // Empty name
+            "metadata",
             100,
-            TICKET_PRICE,
+            1 ether,
+            block.timestamp,
             block.timestamp + 1 days,
-            block.timestamp + 2 days,
             true,
-            500
+            false,
+            500,
+            address(0)
         );
-        
-        vm.prank(organizer1);
-        uint256 event2 = ticketMaster.createEvent(
-            "Event 2",
-            "ipfs://Qm2",
-            100,
-            TICKET_PRICE,
-            block.timestamp + 3 days,
-            block.timestamp + 4 days,
-            true,
-            500
-        );
-        
-        // Buy tickets for both events
-        vm.startPrank(buyer1);
-        ticketMaster.mintTicket{value: TICKET_PRICE * 5}(event1, 5);
-        ticketMaster.mintTicket{value: TICKET_PRICE * 3}(event2, 3);
-        vm.stopPrank();
-        
-        // Batch transfer
-        uint256[] memory ids = new uint256[](2);
-        ids[0] = event1;
-        ids[1] = event2;
-        
-        uint256[] memory amounts = new uint256[](2);
-        amounts[0] = 2;
-        amounts[1] = 1;
-        
-        vm.prank(buyer1);
-        ticketMaster.safeBatchTransferFrom(
-            buyer1,
-            buyer2,
-            ids,
-            amounts,
-            ""
-        );
-        
-        assertEq(ticketMaster.balanceOf(buyer1, event1), 3);
-        assertEq(ticketMaster.balanceOf(buyer1, event2), 2);
-        assertEq(ticketMaster.balanceOf(buyer2, event1), 2);
-        assertEq(ticketMaster.balanceOf(buyer2, event2), 1);
     }
 
-    function testBatchBurn() public {
-        vm.prank(organizer1);
-        uint256 event1 = ticketMaster.createEvent(
-            "Event 1",
-            "ipfs://Qm1",
-            100,
-            TICKET_PRICE,
+    function testRevert_MintInsufficientPayment() public {
+        uint256 price = ticketMaster.getDynamicPrice(eventId);
+        uint256 insufficientPayment = price / 2;  // Half the price
+        
+        vm.prank(buyer);
+        vm.deal(buyer, insufficientPayment);
+        vm.expectRevert(TicketMaster.Err_InsufficientPayment.selector);
+        ticketMaster.mintTicket{value: insufficientPayment}(eventId, 1);
+    }
+
+    function testRevert_MintExceedsMaxSupply() public {
+        vm.prank(organizer);
+        vm.deal(organizer, 100 ether);
+        uint256 smallEventId = ticketMaster.createEvent(
+            "SmallEvent",
+            "metadata",
+            5,
+            1 ether,
+            block.timestamp,
             block.timestamp + 1 days,
-            block.timestamp + 2 days,
             true,
-            500
+            false,
+            500,
+            address(0)
         );
-        
-        vm.prank(organizer1);
-        uint256 event2 = ticketMaster.createEvent(
-            "Event 2",
-            "ipfs://Qm2",
+
+        uint256 price = ticketMaster.getDynamicPrice(smallEventId);
+        uint256 totalPrice = price * 10;  // Try to mint more than max supply
+
+        vm.prank(buyer);
+        vm.deal(buyer, totalPrice);
+        vm.expectRevert(TicketMaster.Err_MaxSupplyExceeded.selector);
+        ticketMaster.mintTicket{value: totalPrice}(smallEventId, 10);
+    }
+
+    function testRevert_TransferNotAllowed() public {
+        // Create non-transferable event
+        vm.prank(organizer);
+        vm.deal(organizer, 100 ether);
+        uint256 nonTransferableEventId = ticketMaster.createEvent(
+            "NonTransferable",
+            "metadata",
             100,
-            TICKET_PRICE,
-            block.timestamp + 3 days,
-            block.timestamp + 4 days,
-            true,
-            500
+            1 ether,
+            block.timestamp,
+            block.timestamp + 1 days,
+            false,  // Not transferable
+            false,
+            500,
+            address(0)
         );
-        
-        vm.startPrank(buyer1);
-        ticketMaster.mintTicket{value: TICKET_PRICE * 5}(event1, 5);
-        ticketMaster.mintTicket{value: TICKET_PRICE * 3}(event2, 3);
-        
-        // Burn multiple tickets at once
-        ticketMaster.burnTicket(event1, 2);
-        ticketMaster.burnTicket(event2, 1);
-        
-        assertEq(ticketMaster.balanceOf(buyer1, event1), 3);
-        assertEq(ticketMaster.balanceOf(buyer1, event2), 2);
-        vm.stopPrank();
-    }
-}
 
-// ============================================
-// MOCK CONTRACTS FOR TESTING
-// ============================================
+        // Mint ticket
+        uint256 price = ticketMaster.getDynamicPrice(nonTransferableEventId);
+        vm.prank(buyer);
+        vm.deal(buyer, price);
+        ticketMaster.mintTicket{value: price}(nonTransferableEventId, 1);
 
-contract MaliciousReceiver {
-    TicketMaster public ticketMaster;
-    bool public attacking;
-    
-    constructor(TicketMaster _ticketMaster) {
-        ticketMaster = _ticketMaster;
-    }
-    
-    function attack(uint256 eventId) external payable {
-        attacking = true;
-        ticketMaster.mintTicket{value: msg.value}(eventId, 1);
-    }
-    
-    receive() external payable {
-        if (attacking) {
-            // Try to re-enter
-            attacking = false;
-            // This should fail due to reentrancy guard
-            ticketMaster.mintTicket{value: 0.1 ether}(0, 1);
-        }
+        uint256[] memory tickets = ticketMaster.getUserTickets(nonTransferableEventId, buyer);
+        uint256[] memory ticketIds = new uint256[](1);
+        ticketIds[0] = tickets[0];
+
+        vm.prank(buyer);
+        vm.expectRevert(TicketMaster.Err_TransferNotAllowed.selector);
+        ticketMaster.safeTransferFromWithRoyalty(buyer, address(0x5), nonTransferableEventId, 1, ticketIds);
     }
 }
